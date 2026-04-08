@@ -1,0 +1,15 @@
+services:
+  oanda-scalper:
+    build: .
+    image: oanda-scalper:latest
+    container_name: oanda-scalper
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import oandapyV20; print('ok')"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
