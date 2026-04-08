@@ -42,6 +42,13 @@ class Config:
     loop_interval: int = field(default_factory=lambda: int(_get_env("LOOP_INTERVAL", "20")))
     log_level: str = field(default_factory=lambda: _get_env("LOG_LEVEL", "INFO"))
 
+    telegram_bot_token: str = field(
+        default_factory=lambda: _get_env("TELEGRAM_BOT_TOKEN", "") or ""
+    )
+    telegram_chat_id: str = field(
+        default_factory=lambda: _get_env("TELEGRAM_CHAT_ID", "") or ""
+    )
+
     candles_count: int = 200  # número de velas históricas para los indicadores
 
     def configure_logging(self) -> None:

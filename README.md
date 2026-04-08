@@ -97,6 +97,26 @@ Las variables más importantes:
 | `ATR_TP_MULT`           | Multiplicador del ATR para el TP                           | `2.5`            |
 | `LOOP_INTERVAL`         | Segundos entre análisis                                    | `20`             |
 | `LOG_LEVEL`             | `DEBUG`, `INFO`, `WARNING`, …                              | `INFO`           |
+| `TELEGRAM_BOT_TOKEN`    | Token del bot de Telegram (opcional)                       | *(vacío)*        |
+| `TELEGRAM_CHAT_ID`      | Chat ID al que enviar las notificaciones                   | *(vacío)*        |
+
+### Notificaciones por Telegram
+
+Si defines `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `.env`, el bot
+enviará un mensaje cuando:
+
+- arranca (con entorno, instrumentos, granularidad y balance inicial),
+- abre una operación (con dirección, unidades, entry, SL, TP y motivo).
+
+Cómo obtener un `chat_id`:
+
+1. Crea tu bot con [@BotFather](https://t.me/BotFather) y guarda el token.
+2. Inicia una conversación con tu bot y envíale cualquier mensaje.
+3. Visita `https://api.telegram.org/bot<TOKEN>/getUpdates` y copia el valor de
+   `"chat":{"id": …}`.
+
+Si alguno de los dos valores queda vacío, las notificaciones se desactivan
+silenciosamente y el trading sigue funcionando con normalidad.
 
 ### 3. Ejecutar con Docker
 

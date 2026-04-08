@@ -6,6 +6,7 @@ import time
 from typing import Dict
 
 from .config import Config
+from .notifier import TelegramNotifier
 from .oanda_client import OandaClient
 from .risk_manager import RiskManager
 from .strategy import ScalpingStrategy, Signal, TradeSetup
@@ -26,6 +27,10 @@ class Trader:
             atr_tp_mult=config.atr_tp_mult,
         )
         self.risk = RiskManager(max_daily_loss=config.max_daily_loss)
+        self.notifier = TelegramNotifier(
+            token=config.telegram_bot_token,
+            chat_id=config.telegram_chat_id,
+        )
         self.precision_cache: Dict[str, int] = {}
 
     # ------------------------------------------------------------------ Setup
@@ -49,8 +54,15 @@ class Trader:
             balance = self.client.get_balance()
             logger.info("Balance inicial cuenta: %.2f", balance)
             self.risk.update_day(balance)
+            self.notifier.notify_startup(
+                environment=self.config.environment,
+                instruments=self.config.instruments,
+                granularity=self.config.granularity,
+                balance=balance,
+            )
         except Exception as exc:  # pragma: no cover - red
             logger.exception("No se pudo obtener el balance inicial: %s", exc)
+            self.notifier.notify_error(f"Fallo al arrancar: {exc}")
             raise
 
         while True:
@@ -152,5 +164,14 @@ class Trader:
         fill = response.get("orderFillTransaction") or response.get("orderCreateTransaction")
         if fill:
             logger.info("Orden ejecutada: id=%s", fill.get("id"))
+            self.notifier.notify_entry(
+                instrument=instrument,
+                side=setup.signal.value,
+                units=units,
+                entry_price=live_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                reason=setup.reason,
+            )
         else:
             logger.warning("Respuesta inesperada al crear orden: %s", response)
