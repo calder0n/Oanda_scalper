@@ -97,29 +97,23 @@ class Trader:
         session = current_session(sessions=self.sessions)
         self._handle_session_transition(session, balance)
 
-        if session is None:
-            logger.debug("Fuera de sesión, esperando.")
-            return
-
-        if self.risk.is_halted():
-            logger.info("Trader pausado por límite de pérdida diaria.")
-            return
-
         open_trades = self.client.get_open_trades()
-        if len(open_trades) >= self.config.max_concurrent_trades:
-            logger.debug(
-                "Operaciones abiertas (%d) >= máximo (%d). Esperando.",
-                len(open_trades),
-                self.config.max_concurrent_trades,
-            )
-            return
-
         instruments_in_position = {t["instrument"] for t in open_trades}
+        halted = self.risk.is_halted()
+        max_reached = len(open_trades) >= self.config.max_concurrent_trades
+
+        # Siempre evaluamos todos los instrumentos para loggear el snapshot de
+        # RSI/ADX/precio, independientemente de si podemos operar o no.
         for instrument in self.config.instruments:
-            if instrument in instruments_in_position:
-                continue
             try:
-                self._evaluate_instrument(instrument, balance, session)
+                self._evaluate_instrument(
+                    instrument=instrument,
+                    balance=balance,
+                    session=session,
+                    in_position=instrument in instruments_in_position,
+                    max_reached=max_reached,
+                    halted=halted,
+                )
             except Exception as exc:  # pragma: no cover - red
                 logger.exception("Fallo al analizar %s: %s", instrument, exc)
 
@@ -152,7 +146,13 @@ class Trader:
 
     # ------------------------------------------------------------------ Análisis
     def _evaluate_instrument(
-        self, instrument: str, balance: float, session: TradingSession
+        self,
+        instrument: str,
+        balance: float,
+        session: Optional[TradingSession],
+        in_position: bool,
+        max_reached: bool,
+        halted: bool,
     ) -> None:
         df = self.client.get_candles(
             instrument=instrument,
@@ -168,6 +168,25 @@ class Trader:
             logger.warning("%s datos insuficientes para calcular indicadores", instrument)
             return
 
+        # Construimos un estado legible que explica qué se está haciendo
+        if result.setup is None:
+            signal_status = "sin señal (RSI/ADX)"
+        else:
+            signal_status = f"SEÑAL {result.setup.signal.value}"
+
+        blockers: list[str] = []
+        if session is None:
+            blockers.append("fuera de sesión")
+        if halted:
+            blockers.append("halt diario")
+        if in_position:
+            blockers.append("posición abierta")
+        if max_reached:
+            blockers.append(
+                f"max trades ({self.config.max_concurrent_trades})"
+            )
+        status = signal_status + (f" | bloqueado: {', '.join(blockers)}" if blockers else "")
+
         logger.info(
             "%s precio=%.5f | RSI(14)=%.2f | ADX(14)=%.2f | ATR(14)=%.5f | %s",
             instrument,
@@ -175,12 +194,17 @@ class Trader:
             result.rsi,
             result.adx,
             result.atr,
-            "SEÑAL " + result.setup.signal.value if result.setup else "sin señal",
+            status,
         )
 
         setup = result.setup
         if setup is None or setup.signal == Signal.HOLD:
             return
+
+        # A partir de aquí intentaríamos ejecutar; si hay un bloqueador, salimos.
+        if blockers:
+            return
+        assert session is not None  # garantizado por blockers sin "fuera de sesión"
 
         # Filtro 3: spread dinámico
         price_info = self.client.get_current_price(instrument)
