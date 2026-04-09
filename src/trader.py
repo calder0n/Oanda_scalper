@@ -163,9 +163,23 @@ class Trader:
             logger.warning("Sin datos de velas para %s", instrument)
             return
 
-        setup = self.strategy.evaluate(df)
-        if not setup or setup.signal == Signal.HOLD:
-            logger.debug("%s sin señal", instrument)
+        result = self.strategy.evaluate(df)
+        if result is None:
+            logger.warning("%s datos insuficientes para calcular indicadores", instrument)
+            return
+
+        logger.info(
+            "%s precio=%.5f | RSI(14)=%.2f | ADX(14)=%.2f | ATR(14)=%.5f | %s",
+            instrument,
+            result.price,
+            result.rsi,
+            result.adx,
+            result.atr,
+            "SEÑAL " + result.setup.signal.value if result.setup else "sin señal",
+        )
+
+        setup = result.setup
+        if setup is None or setup.signal == Signal.HOLD:
             return
 
         # Filtro 3: spread dinámico

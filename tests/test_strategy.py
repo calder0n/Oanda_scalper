@@ -14,20 +14,26 @@ def _df_from_close(close: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close})
 
 
-def test_no_signal_when_adx_low():
-    # Mercado plano: ADX bajo, RSI cerca de 50, no debe disparar nada
+def test_snapshot_always_returned_even_without_setup():
+    # Mercado plano: ADX bajo, no debe disparar entrada pero sí devolver el snapshot
     close = np.full(120, 100.0) + np.random.default_rng(0).normal(0, 0.01, 120)
     df = _df_from_close(close)
-    strat = ScalpingStrategy(min_adx=25)
-    assert strat.evaluate(df) is None
+    result = ScalpingStrategy(min_adx=25).evaluate(df)
+    assert result is not None
+    assert result.setup is None
+    assert result.price > 0
+    assert 0 <= result.rsi <= 100
+    assert result.adx >= 0
 
 
 def test_buy_signal_on_strong_downtrend_then_oversold():
     # Caída pronunciada → ADX alto y RSI bajo → señal de COMPRA
     close = np.linspace(120.0, 100.0, 120)
     df = _df_from_close(close)
-    setup = ScalpingStrategy(min_adx=20).evaluate(df)
-    assert setup is not None
+    result = ScalpingStrategy(min_adx=20).evaluate(df)
+    assert result is not None
+    assert result.setup is not None
+    setup = result.setup
     assert setup.signal == Signal.BUY
     assert setup.rsi <= 35
     assert setup.adx > 20
@@ -38,8 +44,10 @@ def test_sell_signal_on_strong_uptrend_then_overbought():
     # Subida sostenida → ADX alto y RSI alto → señal de VENTA
     close = np.linspace(100.0, 120.0, 120)
     df = _df_from_close(close)
-    setup = ScalpingStrategy(min_adx=20).evaluate(df)
-    assert setup is not None
+    result = ScalpingStrategy(min_adx=20).evaluate(df)
+    assert result is not None
+    assert result.setup is not None
+    setup = result.setup
     assert setup.signal == Signal.SELL
     assert setup.rsi >= 60
     assert setup.adx > 20
