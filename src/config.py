@@ -39,6 +39,21 @@ class Config:
     atr_sl_mult: float = field(default_factory=lambda: float(_get_env("ATR_SL_MULT", "1.5")))
     atr_tp_mult: float = field(default_factory=lambda: float(_get_env("ATR_TP_MULT", "2.5")))
 
+    # Filtros de la estrategia
+    min_adx: float = field(default_factory=lambda: float(_get_env("MIN_ADX", "25")))
+    rsi_buy_threshold: float = field(
+        default_factory=lambda: float(_get_env("RSI_BUY_THRESHOLD", "35"))
+    )
+    rsi_sell_threshold: float = field(
+        default_factory=lambda: float(_get_env("RSI_SELL_THRESHOLD", "60"))
+    )
+    spread_atr_ratio: float = field(
+        default_factory=lambda: float(_get_env("SPREAD_ATR_RATIO", "0.15"))
+    )
+    sessions_spec: str = field(
+        default_factory=lambda: _get_env("SESSIONS_UTC", "Londres:7-12,Nueva York:13-17")
+    )
+
     loop_interval: int = field(default_factory=lambda: int(_get_env("LOOP_INTERVAL", "20")))
     log_level: str = field(default_factory=lambda: _get_env("LOG_LEVEL", "INFO"))
 
@@ -47,6 +62,10 @@ class Config:
     )
     telegram_chat_id: str = field(
         default_factory=lambda: _get_env("TELEGRAM_CHAT_ID", "") or ""
+    )
+
+    trade_log_path: str = field(
+        default_factory=lambda: _get_env("TRADE_LOG_PATH", "/app/logs/trades.csv")
     )
 
     candles_count: int = 200  # número de velas históricas para los indicadores

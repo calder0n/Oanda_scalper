@@ -1,9 +1,16 @@
-"""Estrategia de scalping multi-confirmación.
+"""Estrategia de scalping mean-reversion con filtro de fuerza de tendencia.
 
-La idea es operar a favor de la tendencia (EMA 9 > EMA 21 > EMA 50 para largos
-y al revés para cortos), entrar cuando el precio retrocede a la EMA rápida y
-confirmar momento con RSI y MACD. Se filtra la volatilidad mínima con la
-anchura de las bandas de Bollinger y el ATR.
+Reglas (puramente sobre indicadores; los filtros de horario y spread se
+aplican en el `Trader`):
+
+1. **ADX(14) > MIN_ADX (default 25)** → solo se opera cuando el mercado se
+   está moviendo con fuerza, no en lateral.
+2. **RSI(14) ≤ RSI_BUY (default 35)** → señal de COMPRA (mean-reversion al alza).
+3. **RSI(14) ≥ RSI_SELL (default 60)** → señal de VENTA (mean-reversion a la baja).
+
+SL y TP se calculan con ATR:
+    SL = entry ± ATR × ATR_SL_MULT
+    TP = entry ± ATR × ATR_TP_MULT
 """
 from __future__ import annotations
 
@@ -29,64 +36,49 @@ class TradeSetup:
     stop_loss: float
     take_profit: float
     atr: float
+    rsi: float
+    adx: float
     reason: str
 
 
 class ScalpingStrategy:
-    """Estrategia de scalping basada en EMA + RSI + MACD + ATR."""
-
     def __init__(
         self,
         atr_sl_mult: float = 1.5,
         atr_tp_mult: float = 2.5,
-        min_bb_width: float = 0.0008,
-        rsi_long_min: float = 40.0,
-        rsi_long_max: float = 70.0,
-        rsi_short_min: float = 30.0,
-        rsi_short_max: float = 60.0,
+        min_adx: float = 25.0,
+        rsi_buy_threshold: float = 35.0,
+        rsi_sell_threshold: float = 60.0,
     ) -> None:
         self.atr_sl_mult = atr_sl_mult
         self.atr_tp_mult = atr_tp_mult
-        self.min_bb_width = min_bb_width
-        self.rsi_long_min = rsi_long_min
-        self.rsi_long_max = rsi_long_max
-        self.rsi_short_min = rsi_short_min
-        self.rsi_short_max = rsi_short_max
+        self.min_adx = min_adx
+        self.rsi_buy = rsi_buy_threshold
+        self.rsi_sell = rsi_sell_threshold
 
     def evaluate(self, df: pd.DataFrame) -> Optional[TradeSetup]:
-        if df is None or len(df) < 60:
+        if df is None or len(df) < 30:
             return None
 
         data = add_indicators(df).dropna()
-        if len(data) < 3:
+        if data.empty:
             return None
 
         last = data.iloc[-1]
-        prev = data.iloc[-2]
-
-        # Filtro de volatilidad: evitar mercado lateral aburrido
-        if pd.isna(last["bb_width"]) or last["bb_width"] < self.min_bb_width:
-            return None
-        if pd.isna(last["atr"]) or last["atr"] <= 0:
-            return None
-
-        price = float(last["close"])
         atr_value = float(last["atr"])
+        rsi_value = float(last["rsi"])
+        adx_value = float(last["adx"])
+        price = float(last["close"])
 
-        long_trend = last["ema_fast"] > last["ema_slow"] > last["ema_trend"]
-        short_trend = last["ema_fast"] < last["ema_slow"] < last["ema_trend"]
+        if atr_value <= 0:
+            return None
 
-        macd_bull = last["macd"] > last["signal"] and last["hist"] > prev["hist"]
-        macd_bear = last["macd"] < last["signal"] and last["hist"] < prev["hist"]
+        # Filtro 1: fuerza de tendencia
+        if adx_value < self.min_adx:
+            return None
 
-        # Buscamos un retroceso a la EMA rápida, no una entrada extendida
-        pullback_long = prev["low"] <= prev["ema_fast"] and last["close"] > last["ema_fast"]
-        pullback_short = prev["high"] >= prev["ema_fast"] and last["close"] < last["ema_fast"]
-
-        rsi_long_ok = self.rsi_long_min < last["rsi"] < self.rsi_long_max
-        rsi_short_ok = self.rsi_short_min < last["rsi"] < self.rsi_short_max
-
-        if long_trend and pullback_long and macd_bull and rsi_long_ok:
+        # Filtro 2: extremos de RSI
+        if rsi_value <= self.rsi_buy:
             sl = price - self.atr_sl_mult * atr_value
             tp = price + self.atr_tp_mult * atr_value
             return TradeSetup(
@@ -95,10 +87,15 @@ class ScalpingStrategy:
                 stop_loss=sl,
                 take_profit=tp,
                 atr=atr_value,
-                reason="EMA alcista + pullback + MACD alcista + RSI ok",
+                rsi=rsi_value,
+                adx=adx_value,
+                reason=(
+                    f"RSI={rsi_value:.1f} ≤ {self.rsi_buy:.0f} "
+                    f"y ADX={adx_value:.1f} > {self.min_adx:.0f}"
+                ),
             )
 
-        if short_trend and pullback_short and macd_bear and rsi_short_ok:
+        if rsi_value >= self.rsi_sell:
             sl = price + self.atr_sl_mult * atr_value
             tp = price - self.atr_tp_mult * atr_value
             return TradeSetup(
@@ -107,7 +104,12 @@ class ScalpingStrategy:
                 stop_loss=sl,
                 take_profit=tp,
                 atr=atr_value,
-                reason="EMA bajista + pullback + MACD bajista + RSI ok",
+                rsi=rsi_value,
+                adx=adx_value,
+                reason=(
+                    f"RSI={rsi_value:.1f} ≥ {self.rsi_sell:.0f} "
+                    f"y ADX={adx_value:.1f} > {self.min_adx:.0f}"
+                ),
             )
 
         return None

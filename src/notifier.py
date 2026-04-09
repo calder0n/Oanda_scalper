@@ -1,14 +1,15 @@
-"""Notificaciones sencillas a Telegram vía Bot API.
+"""Notificaciones a Telegram vía Bot API.
 
 Usa únicamente `requests` para evitar añadir dependencias. Si el bot no está
-configurado (sin token o sin chat_id) se convierte en un no-op silencioso y los
-errores de red se loggean pero **no** interrumpen el trading.
+configurado (sin token o sin chat_id) se convierte en un no-op silencioso y
+los errores de red se loggean pero **no** interrumpen el trading.
 """
 from __future__ import annotations
 
 import html
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from typing import List, Optional
 
 import requests
 
@@ -56,16 +57,47 @@ class TelegramNotifier:
     def notify_startup(
         self,
         environment: str,
-        instruments: list[str],
+        instruments: List[str],
         granularity: str,
         balance: float,
+        sessions_label: str,
     ) -> None:
         text = (
             "🟢 <b>Oanda Scalper arrancado</b>\n"
             f"• Entorno: <code>{html.escape(environment)}</code>\n"
             f"• Instrumentos: <code>{html.escape(', '.join(instruments))}</code>\n"
             f"• Velas: <code>{html.escape(granularity)}</code>\n"
+            f"• Sesiones: <code>{html.escape(sessions_label)}</code>\n"
             f"• Balance: <b>{balance:,.2f}</b>"
+        )
+        self.send(text)
+
+    def notify_session_start(
+        self,
+        session_name: str,
+        start_hour: int,
+        end_hour: int,
+        instruments: List[str],
+        balance: float,
+    ) -> None:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        text = (
+            "📈 <b>Sesión abierta</b>\n"
+            f"• Sesión: <b>{html.escape(session_name)}</b>\n"
+            f"• Horario: <code>{start_hour:02d}:00 - {end_hour:02d}:00 UTC</code>\n"
+            f"• Hora actual: <code>{now}</code>\n"
+            f"• Instrumentos: <code>{html.escape(', '.join(instruments))}</code>\n"
+            f"• Balance: <b>{balance:,.2f}</b>\n"
+            "Comenzando a operar…"
+        )
+        self.send(text)
+
+    def notify_session_end(self, session_name: str, balance: float) -> None:
+        text = (
+            "🌙 <b>Sesión cerrada</b>\n"
+            f"• Sesión: <b>{html.escape(session_name)}</b>\n"
+            f"• Balance: <b>{balance:,.2f}</b>\n"
+            "Bot en pausa hasta la siguiente sesión."
         )
         self.send(text)
 
@@ -77,16 +109,35 @@ class TelegramNotifier:
         entry_price: float,
         stop_loss: float,
         take_profit: float,
+        atr: float,
+        rsi: float,
+        adx: float,
+        spread: float,
+        balance: float,
+        session: str,
         reason: str,
+        order_id: str = "",
     ) -> None:
         emoji = "🟢" if side.upper() == "BUY" else "🔴"
+        risk_pips = abs(entry_price - stop_loss)
+        reward_pips = abs(take_profit - entry_price)
+        rr = reward_pips / risk_pips if risk_pips else 0.0
         text = (
-            f"{emoji} <b>Entrada {html.escape(side)}</b> en <code>{html.escape(instrument)}</code>\n"
+            f"{emoji} <b>Entrada {html.escape(side)}</b> — <code>{html.escape(instrument)}</code>\n"
+            f"• Sesión: <b>{html.escape(session)}</b>\n"
             f"• Unidades: <b>{units:+,}</b>\n"
             f"• Entry: <code>{entry_price:.5f}</code>\n"
-            f"• SL: <code>{stop_loss:.5f}</code>\n"
-            f"• TP: <code>{take_profit:.5f}</code>\n"
-            f"• Motivo: <i>{html.escape(reason)}</i>"
+            f"• SL: <code>{stop_loss:.5f}</code>  (riesgo {risk_pips:.5f})\n"
+            f"• TP: <code>{take_profit:.5f}</code>  (objetivo {reward_pips:.5f})\n"
+            f"• R:R: <b>1:{rr:.2f}</b>\n"
+            "—— <b>Indicadores</b> ——\n"
+            f"• RSI(14): <b>{rsi:.2f}</b>\n"
+            f"• ADX(14): <b>{adx:.2f}</b>\n"
+            f"• ATR(14): <code>{atr:.5f}</code>\n"
+            f"• Spread: <code>{spread:.5f}</code> (límite {atr * 0.15:.5f})\n"
+            f"• Balance: <b>{balance:,.2f}</b>\n"
+            f"• Decisión: <i>{html.escape(reason)}</i>"
+            + (f"\n• Order ID: <code>{html.escape(str(order_id))}</code>" if order_id else "")
         )
         self.send(text)
 

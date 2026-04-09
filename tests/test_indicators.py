@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.indicators import add_indicators, atr, ema, macd, rsi
+from src.indicators import add_indicators, adx, atr, rsi
 
 
 def _sample_df(n: int = 200) -> pd.DataFrame:
@@ -14,11 +14,6 @@ def _sample_df(n: int = 200) -> pd.DataFrame:
     low = close - rng.uniform(0.1, 0.5, n)
     open_ = close + rng.uniform(-0.2, 0.2, n)
     return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close})
-
-
-def test_ema_length():
-    df = _sample_df()
-    assert len(ema(df["close"], 9)) == len(df)
 
 
 def test_rsi_bounds():
@@ -33,27 +28,14 @@ def test_atr_positive():
     assert (values > 0).all()
 
 
-def test_macd_columns():
+def test_adx_bounds():
     df = _sample_df()
-    out = macd(df["close"])
-    assert {"macd", "signal", "hist"}.issubset(out.columns)
+    values = adx(df).dropna()
+    assert (values >= 0).all()
+    assert (values <= 100).all()
 
 
 def test_add_indicators_columns():
     df = _sample_df()
     out = add_indicators(df)
-    expected = {
-        "ema_fast",
-        "ema_slow",
-        "ema_trend",
-        "rsi",
-        "atr",
-        "macd",
-        "signal",
-        "hist",
-        "bb_mid",
-        "bb_upper",
-        "bb_lower",
-        "bb_width",
-    }
-    assert expected.issubset(out.columns)
+    assert {"rsi", "atr", "adx"}.issubset(out.columns)
