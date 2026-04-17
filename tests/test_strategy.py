@@ -15,10 +15,10 @@ def _df_from_close(close: np.ndarray) -> pd.DataFrame:
 
 
 def test_snapshot_always_returned_even_without_setup():
-    # Mercado plano: ADX bajo, no debe disparar entrada pero sí devolver el snapshot
-    close = np.full(120, 100.0) + np.random.default_rng(0).normal(0, 0.01, 120)
+    # Mercado plano: sin tendencia ni condiciones de pullback → snapshot sin setup
+    close = np.full(200, 100.0) + np.random.default_rng(0).normal(0, 0.01, 200)
     df = _df_from_close(close)
-    result = ScalpingStrategy(min_adx=25).evaluate(df)
+    result = ScalpingStrategy().evaluate(df)
     assert result is not None
     assert result.setup is None
     assert result.price > 0
@@ -26,29 +26,81 @@ def test_snapshot_always_returned_even_without_setup():
     assert result.adx >= 0
 
 
-def test_buy_signal_on_strong_downtrend_then_oversold():
-    # Caída pronunciada → ADX alto y RSI bajo → señal de COMPRA
+# ------------------------------------------------------------- Trend pullback
+def test_trend_pullback_buy_on_uptrend_with_pullback():
+    # Subida escalonada con pullbacks amplios → EMA rápida > lenta, RSI baja en los retrocesos → BUY
+    rng = np.random.default_rng(5)
+    trend = np.linspace(100.0, 110.0, 300)
+    pullback_noise = np.sin(np.linspace(0, 14 * np.pi, 300)) * 2.5
+    close = trend + pullback_noise + rng.normal(0, 0.1, 300)
+    df = _df_from_close(close)
+    strat = ScalpingStrategy(
+        mode="trend_pullback",
+        min_adx=10,
+        rsi_buy_threshold=45,
+        rsi_sell_threshold=55,
+        ema_fast=10,
+        ema_slow=30,
+    )
+    saw_buy = False
+    for i in range(80, len(df)):
+        res = strat.evaluate(df.iloc[: i + 1])
+        if res and res.setup and res.setup.signal == Signal.BUY:
+            saw_buy = True
+            break
+    assert saw_buy, "Debería emerger al menos una señal BUY en una subida con pullbacks"
+
+
+def test_trend_pullback_sell_on_downtrend_with_pullback():
+    rng = np.random.default_rng(6)
+    trend = np.linspace(110.0, 100.0, 300)
+    pullback_noise = np.sin(np.linspace(0, 14 * np.pi, 300)) * 2.5
+    close = trend + pullback_noise + rng.normal(0, 0.1, 300)
+    df = _df_from_close(close)
+    strat = ScalpingStrategy(
+        mode="trend_pullback",
+        min_adx=10,
+        rsi_buy_threshold=45,
+        rsi_sell_threshold=55,
+        ema_fast=10,
+        ema_slow=30,
+    )
+    saw_sell = False
+    for i in range(80, len(df)):
+        res = strat.evaluate(df.iloc[: i + 1])
+        if res and res.setup and res.setup.signal == Signal.SELL:
+            saw_sell = True
+            break
+    assert saw_sell, "Debería emerger al menos una señal SELL en una bajada con pullbacks"
+
+
+# ------------------------------------------------------------- Mean reversion
+def test_mean_reversion_buy_on_strong_downtrend_then_oversold():
     close = np.linspace(120.0, 100.0, 120)
     df = _df_from_close(close)
-    result = ScalpingStrategy(min_adx=20).evaluate(df)
+    strat = ScalpingStrategy(mode="mean_reversion", min_adx=20, rsi_buy_threshold=35, rsi_sell_threshold=65)
+    result = strat.evaluate(df)
     assert result is not None
     assert result.setup is not None
-    setup = result.setup
-    assert setup.signal == Signal.BUY
-    assert setup.rsi <= 35
-    assert setup.adx > 20
-    assert setup.stop_loss < setup.entry_price < setup.take_profit
+    assert result.setup.signal == Signal.BUY
+    assert result.setup.rsi <= 35
+    assert result.setup.stop_loss < result.setup.entry_price < result.setup.take_profit
 
 
-def test_sell_signal_on_strong_uptrend_then_overbought():
-    # Subida sostenida → ADX alto y RSI alto → señal de VENTA
+def test_mean_reversion_sell_on_strong_uptrend_then_overbought():
     close = np.linspace(100.0, 120.0, 120)
     df = _df_from_close(close)
-    result = ScalpingStrategy(min_adx=20).evaluate(df)
+    strat = ScalpingStrategy(mode="mean_reversion", min_adx=20, rsi_buy_threshold=35, rsi_sell_threshold=65)
+    result = strat.evaluate(df)
     assert result is not None
     assert result.setup is not None
-    setup = result.setup
-    assert setup.signal == Signal.SELL
-    assert setup.rsi >= 60
-    assert setup.adx > 20
-    assert setup.take_profit < setup.entry_price < setup.stop_loss
+    assert result.setup.signal == Signal.SELL
+    assert result.setup.rsi >= 65
+    assert result.setup.take_profit < result.setup.entry_price < result.setup.stop_loss
+
+
+def test_invalid_mode_raises():
+    import pytest
+
+    with pytest.raises(ValueError):
+        ScalpingStrategy(mode="foobar")

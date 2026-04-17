@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+import pandas as pd
+
 from .config import Config
 from .notifier import TelegramNotifier
 from .oanda_client import OandaClient
@@ -13,6 +15,7 @@ from .risk_manager import RiskManager
 from .sessions import TradingSession, current_session, parse_sessions
 from .strategy import ScalpingStrategy, Signal
 from .trade_logger import TradeCSVLogger
+from .trade_manager import TradeManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +34,26 @@ class Trader:
             min_adx=config.min_adx,
             rsi_buy_threshold=config.rsi_buy_threshold,
             rsi_sell_threshold=config.rsi_sell_threshold,
+            mode=config.strategy_mode,
+            ema_fast=config.ema_fast,
+            ema_slow=config.ema_slow,
         )
-        self.risk = RiskManager(max_daily_loss=config.max_daily_loss)
+        self.risk = RiskManager(
+            max_daily_loss=config.max_daily_loss,
+            cooldown_seconds=config.trade_cooldown_seconds,
+        )
         self.notifier = TelegramNotifier(
             token=config.telegram_bot_token,
             chat_id=config.telegram_chat_id,
         )
         self.trade_log = TradeCSVLogger(config.trade_log_path)
+        self.trade_manager = TradeManager(
+            client=self.client,
+            breakeven_enabled=config.breakeven_enabled,
+            breakeven_trigger_r=config.breakeven_trigger_r,
+            trailing_enabled=config.trailing_enabled,
+            trailing_atr_mult=config.trailing_atr_mult,
+        )
         self.sessions = parse_sessions(config.sessions_spec)
         self.precision_cache: Dict[str, int] = {}
         self._last_session: Optional[TradingSession] = None
@@ -57,14 +73,17 @@ class Trader:
     # ------------------------------------------------------------------ Loop
     def run(self) -> None:
         logger.info(
-            "Iniciando trader | env=%s | instrumentos=%s | granularidad=%s | sesiones=%s",
+            "Iniciando trader | env=%s | instrumentos=%s | granularidad=%s/%s | modo=%s | sesiones=%s",
             self.config.environment,
             self.config.instruments,
             self.config.granularity,
+            self.config.granularity_htf,
+            self.config.strategy_mode,
             self._sessions_label(),
         )
         try:
-            balance = self.client.get_balance()
+            summary = self.client.get_account_summary()
+            balance = float(summary["balance"])
             logger.info("Balance inicial cuenta: %.2f", balance)
             self.risk.update_day(balance)
             self.notifier.notify_startup(
@@ -90,23 +109,30 @@ class Trader:
             time.sleep(self.config.loop_interval)
 
     def _tick(self) -> None:
-        balance = self.client.get_balance()
+        summary = self.client.get_account_summary()
+        balance = float(summary["balance"])
+        equity = float(summary.get("NAV", balance))
         self.risk.update_day(balance)
-        self.risk.register_pnl(balance)
+        # NAV-based drawdown captura pérdidas flotantes
+        self.risk.register_pnl(equity)
 
         session = current_session(sessions=self.sessions)
         self._handle_session_transition(session, balance)
 
         open_trades = self.client.get_open_trades()
+        open_ids = {t["id"] for t in open_trades}
+        id_to_instrument = {t["id"]: t["instrument"] for t in open_trades}
+        self.risk.detect_closures(open_ids, id_to_instrument)
         instruments_in_position = {t["instrument"] for t in open_trades}
         halted = self.risk.is_halted()
         max_reached = len(open_trades) >= self.config.max_concurrent_trades
 
-        # Siempre evaluamos todos los instrumentos para loggear el snapshot de
-        # RSI/ADX/precio, independientemente de si podemos operar o no.
+        # Cacheamos velas M1 por instrumento para reutilizar en trade_manager
+        candles_cache: Dict[str, pd.DataFrame] = {}
+
         for instrument in self.config.instruments:
             try:
-                self._evaluate_instrument(
+                df = self._evaluate_instrument(
                     instrument=instrument,
                     balance=balance,
                     session=session,
@@ -114,8 +140,21 @@ class Trader:
                     max_reached=max_reached,
                     halted=halted,
                 )
+                if df is not None:
+                    candles_cache[instrument] = df
             except Exception as exc:  # pragma: no cover - red
                 logger.exception("Fallo al analizar %s: %s", instrument, exc)
+
+        # Gestión de trades abiertos: breakeven / trailing
+        if open_trades:
+            try:
+                self.trade_manager.manage(
+                    open_trades=open_trades,
+                    candles_by_instrument=candles_cache,
+                    precision_lookup=self._instrument_precision,
+                )
+            except Exception as exc:  # pragma: no cover - red
+                logger.exception("Fallo en trade_manager.manage: %s", exc)
 
     # ------------------------------------------------------------------ Sesiones
     def _handle_session_transition(
@@ -123,11 +162,9 @@ class Trader:
     ) -> None:
         if session == self._last_session:
             return
-        # Cierre de sesión anterior
         if self._last_session is not None and session != self._last_session:
             logger.info("Sesión %s cerrada", self._last_session.name)
             self.notifier.notify_session_end(self._last_session.name, balance)
-        # Apertura de la nueva
         if session is not None:
             logger.info(
                 "Iniciando sesión %s (%02d-%02d UTC)",
@@ -144,6 +181,31 @@ class Trader:
             )
         self._last_session = session
 
+    # ------------------------------------------------------------------ MTF
+    def _htf_trend_direction(self, instrument: str) -> Optional[str]:
+        """Devuelve 'up' / 'down' / None según la tendencia en HTF (default M5).
+
+        Usa EMA rápida vs lenta del mismo periodo configurado en la estrategia.
+        """
+        try:
+            df = self.client.get_candles(
+                instrument=instrument,
+                granularity=self.config.granularity_htf,
+                count=max(self.config.candles_count, self.config.ema_slow + 20),
+            )
+        except Exception as exc:  # pragma: no cover - red
+            logger.warning("No se pudo obtener HTF %s: %s", instrument, exc)
+            return None
+        if df is None or df.empty or len(df) < self.config.ema_slow + 2:
+            return None
+        fast = df["close"].ewm(span=self.config.ema_fast, adjust=False).mean().iloc[-1]
+        slow = df["close"].ewm(span=self.config.ema_slow, adjust=False).mean().iloc[-1]
+        if fast > slow:
+            return "up"
+        if fast < slow:
+            return "down"
+        return None
+
     # ------------------------------------------------------------------ Análisis
     def _evaluate_instrument(
         self,
@@ -153,7 +215,7 @@ class Trader:
         in_position: bool,
         max_reached: bool,
         halted: bool,
-    ) -> None:
+    ) -> Optional[pd.DataFrame]:
         df = self.client.get_candles(
             instrument=instrument,
             granularity=self.config.granularity,
@@ -161,16 +223,15 @@ class Trader:
         )
         if df.empty:
             logger.warning("Sin datos de velas para %s", instrument)
-            return
+            return None
 
         result = self.strategy.evaluate(df)
         if result is None:
             logger.warning("%s datos insuficientes para calcular indicadores", instrument)
-            return
+            return df
 
-        # Construimos un estado legible que explica qué se está haciendo
         if result.setup is None:
-            signal_status = "sin señal (RSI/ADX)"
+            signal_status = "sin señal"
         else:
             signal_status = f"SEÑAL {result.setup.signal.value}"
 
@@ -182,13 +243,13 @@ class Trader:
         if in_position:
             blockers.append("posición abierta")
         if max_reached:
-            blockers.append(
-                f"max trades ({self.config.max_concurrent_trades})"
-            )
+            blockers.append(f"max trades ({self.config.max_concurrent_trades})")
+        if self.risk.in_cooldown(instrument):
+            blockers.append("cooldown")
         status = signal_status + (f" | bloqueado: {', '.join(blockers)}" if blockers else "")
 
         logger.info(
-            "%s precio=%.5f | RSI(14)=%.2f | ADX(14)=%.2f | ATR(14)=%.5f | %s",
+            "%s precio=%.5f | RSI=%.2f | ADX=%.2f | ATR=%.5f | %s",
             instrument,
             result.price,
             result.rsi,
@@ -199,26 +260,34 @@ class Trader:
 
         setup = result.setup
         if setup is None or setup.signal == Signal.HOLD:
-            return
-
-        # A partir de aquí intentaríamos ejecutar; si hay un bloqueador, salimos.
+            return df
         if blockers:
-            return
-        assert session is not None  # garantizado por blockers sin "fuera de sesión"
+            return df
+        assert session is not None
 
-        # Filtro 3: spread dinámico
+        # Confirmación multi-timeframe
+        if self.config.htf_confirmation:
+            htf = self._htf_trend_direction(instrument)
+            if htf is None:
+                logger.info("%s HTF indefinido, descartando trade", instrument)
+                return df
+            if setup.signal == Signal.BUY and htf != "up":
+                logger.info("%s BUY rechazado por HTF=%s", instrument, htf)
+                return df
+            if setup.signal == Signal.SELL and htf != "down":
+                logger.info("%s SELL rechazado por HTF=%s", instrument, htf)
+                return df
+
+        # Filtro de spread dinámico
         price_info = self.client.get_current_price(instrument)
         spread = price_info["spread"]
         max_spread = setup.atr * self.config.spread_atr_ratio
         if spread > max_spread:
             logger.info(
                 "%s descartado por spread alto: spread=%.5f > %.5f (ATR*%.2f)",
-                instrument,
-                spread,
-                max_spread,
-                self.config.spread_atr_ratio,
+                instrument, spread, max_spread, self.config.spread_atr_ratio,
             )
-            return
+            return df
 
         live_price = price_info["ask"] if setup.signal == Signal.BUY else price_info["bid"]
 
@@ -238,7 +307,7 @@ class Trader:
         )
         if units <= 0:
             logger.info("%s tamaño calculado = 0, descartando trade", instrument)
-            return
+            return df
 
         if setup.signal == Signal.SELL:
             units = -units
@@ -246,16 +315,8 @@ class Trader:
         precision = self._instrument_precision(instrument)
         logger.info(
             "%s SEÑAL %s | entry=%.5f sl=%.5f tp=%.5f units=%d rsi=%.2f adx=%.2f spread=%.5f motivo=%s",
-            instrument,
-            setup.signal.value,
-            live_price,
-            stop_loss,
-            take_profit,
-            units,
-            setup.rsi,
-            setup.adx,
-            spread,
-            setup.reason,
+            instrument, setup.signal.value, live_price, stop_loss, take_profit,
+            units, setup.rsi, setup.adx, spread, setup.reason,
         )
         response = self.client.create_market_order(
             instrument=instrument,
@@ -271,7 +332,6 @@ class Trader:
         else:
             logger.warning("Respuesta inesperada al crear orden: %s", response)
 
-        # Notificación + persistencia
         self.notifier.notify_entry(
             instrument=instrument,
             side=setup.signal.value,
@@ -305,3 +365,4 @@ class Trader:
             reason=setup.reason,
             order_id=order_id,
         )
+        return df

@@ -117,6 +117,7 @@ class TelegramNotifier:
         session: str,
         reason: str,
         order_id: str = "",
+        spread_atr_ratio: float = 0.15,
     ) -> None:
         emoji = "🟢" if side.upper() == "BUY" else "🔴"
         risk_pips = abs(entry_price - stop_loss)
@@ -134,7 +135,7 @@ class TelegramNotifier:
             f"• RSI(14): <b>{rsi:.2f}</b>\n"
             f"• ADX(14): <b>{adx:.2f}</b>\n"
             f"• ATR(14): <code>{atr:.5f}</code>\n"
-            f"• Spread: <code>{spread:.5f}</code> (límite {atr * 0.15:.5f})\n"
+            f"• Spread: <code>{spread:.5f}</code> (límite {atr * spread_atr_ratio:.5f})\n"
             f"• Balance: <b>{balance:,.2f}</b>\n"
             f"• Decisión: <i>{html.escape(reason)}</i>"
             + (f"\n• Order ID: <code>{html.escape(str(order_id))}</code>" if order_id else "")

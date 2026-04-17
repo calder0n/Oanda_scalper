@@ -1,7 +1,7 @@
 """Indicadores técnicos vectorizados con pandas/numpy.
 
-Solo se exponen los indicadores que utiliza la estrategia actual:
-RSI(14), ATR(14) y ADX(14) de Wilder.
+Indicadores usados por la estrategia: RSI(14), ATR(14), ADX(14) y EMAs
+(por defecto 20/50) para detección de tendencia.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0.0, np.nan)
     rsi_values = 100 - (100 / (1 + rs))
-    # Sin pérdidas → RSI 100 (sobre-compra extrema). Sin ganancias ni pérdidas → RSI 50.
     rsi_values = rsi_values.where(~((avg_loss == 0) & (avg_gain > 0)), other=100.0)
     rsi_values = rsi_values.where(~((avg_loss == 0) & (avg_gain == 0)), other=50.0)
     return rsi_values
@@ -36,7 +35,6 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """ADX de Wilder usando suavizado exponencial equivalente a 1/period."""
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -68,10 +66,20 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return dx.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve una copia del DataFrame con RSI, ATR y ADX añadidos."""
+def ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False, min_periods=period).mean()
+
+
+def add_indicators(
+    df: pd.DataFrame,
+    ema_fast_period: int = 20,
+    ema_slow_period: int = 50,
+) -> pd.DataFrame:
+    """Devuelve una copia del DataFrame con RSI, ATR, ADX y EMAs añadidos."""
     out = df.copy()
     out["rsi"] = rsi(out["close"], 14)
     out["atr"] = atr(out, 14)
     out["adx"] = adx(out, 14)
+    out["ema_fast"] = ema(out["close"], ema_fast_period)
+    out["ema_slow"] = ema(out["close"], ema_slow_period)
     return out
